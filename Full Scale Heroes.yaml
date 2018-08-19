@@ -1,0 +1,694 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'AWS CloudFormation Template for a Heroes web app
+  backed by a Users REST service.  Auto Scaling Groups are used for both.'
+Parameters:
+  InstanceType:
+    AllowedValues:
+    - t2.micro
+    ConstraintDescription: must be a valid EC2 instance type.
+    Default: t2.micro
+    Description: WebServer EC2 instance type
+    Type: String
+  EnvName:
+    AllowedValues:
+    - dev
+    - uat
+    - prod
+    Default: dev
+    Description: Stack environment level (dev/uat/prod)
+    Type: String
+  KeyName:
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instances
+    Type: AWS::EC2::KeyPair::KeyName
+  StackVPCId:
+    ConstraintDescription: must be an id of an existing VPC
+    Default: vpc-c08a25b8
+    Description: id of VPC into which all resources will be launched
+    Type: AWS::EC2::VPC::Id
+  S3CodeBucket:
+    ConstraintDescription: must be an existing S3 bucket
+    Default: my-app-code-bucket
+    Description: S3 bucket containing an app bundle and a REST svc bundle for CodeDeploy
+    Type: String
+  AppBundle:
+    ConstraintDescription: must be an existing file name in the S3CodeBucket
+    Default: my-app-bundle.zip
+    Description: Bundle to be deployed to the WebServer
+    Type: String
+  RESTBundle:
+    ConstraintDescription: must be an existing file name in the S3CodeBucket
+    Default: my-rest-bundle.zip
+    Description: Bundle to be deployed to the RESTServer
+    Type: String
+  ASGSubnets:
+    ConstraintDescription: must be a list of existing subnets in the StackVPCId
+    Default:
+      subnet-70fe7614, subnet-1cf20533, subnet-11ac1d5a,
+      subnet-26ee067b, subnet-d1933eee, subnet-add0eca1
+    Description: List of subnets which autoscaling groups will leverage
+    Type: List<AWS::EC2::Subnet::Id>
+  SSHLocation:
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+    Default: 0.0.0.0/0
+    Description: The IP address range that can be used to SSH to the EC2 instances
+    MaxLength: 18
+    MinLength: 9
+    Type: String
+
+Resources:
+
+  # Load Balancer for the Web servers
+
+  WebListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: WebLBTargetGroup
+      LoadBalancerArn:
+        Ref: WebLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  WebLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: WebServerSecurityGroup
+    Properties:
+      Scheme: internet-facing
+      SecurityGroups:
+      - Ref: WebServerSecurityGroup
+      Subnets:
+        Ref: ASGSubnets # needs to synch with the AutoScalingGroup AZ's
+      Tags:
+      - Key: EnvName
+        Value:
+          Ref: EnvName
+
+  WebLBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 60
+      UnhealthyThresholdCount: 2
+      HealthCheckPath: /
+      Port: 80
+      Protocol: HTTP
+      VpcId:
+        Ref: StackVPCId
+      Tags:
+      - Key: EnvName
+        Value:
+          Ref: EnvName
+
+
+  # REST services Load Balancer
+
+  RESTListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: RESTLBTargetGroup
+      LoadBalancerArn:
+        Ref: RESTLoadBalancer
+      Port: 8080
+      Protocol: HTTP
+
+  RESTLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: RESTServerSecurityGroup
+    Properties:
+      Scheme: internet-facing
+      SecurityGroups:
+      - Ref: RESTServerSecurityGroup
+      Subnets:
+        Ref: ASGSubnets # needs to synch with the AutoScalingGroup AZ's
+      Tags:
+      - Key: EnvName
+        Value:
+          Ref: EnvName
+
+  RESTLBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 60
+      UnhealthyThresholdCount: 2
+      HealthCheckPath: /  # should come up with a different path
+      Port: 8080
+      Protocol: HTTP
+      VpcId:
+        Ref: StackVPCId
+      Tags:
+      - Key: EnvName
+        Value:
+          Ref: EnvName
+
+  CodeDeployApp:
+    Type: AWS::CodeDeploy::Application
+
+  # create the Service Role and the policies required for Code Deployment
+  # groups and EC2 instances.  Will have 3 embedded policy, and one reference
+  # to an AWS managed policy.  Establishes trust with ec2 and codedeploy.
+  EC2AndCodeDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns: # adds the AWSCodeDeployRole
+      - arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole
+      AssumeRolePolicyDocument: # EC2 and CodeDeploy are trusted
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - codedeploy.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies: # set up permissions for CodeDeploy on EC2, plus CloudWatch
+        -       # and access to DynamoDB for the REST service
+          PolicyName: my-code-deploy-ec2-permissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                - s3:Get*
+                - s3:List*
+                Resource:
+                - arn:aws:s3:::codedeploydemobucket/*
+                - arn:aws:s3:::aws-codedeploy-us-east-2/*
+                - arn:aws:s3:::aws-codedeploy-us-east-1/*
+                - arn:aws:s3:::aws-codedeploy-us-west-1/*
+                - arn:aws:s3:::aws-codedeploy-us-west-2/*
+                - arn:aws:s3:::aws-codedeploy-ca-central-1/*
+                - arn:aws:s3:::aws-codedeploy-eu-west-1/*
+                - arn:aws:s3:::aws-codedeploy-eu-west-2/*
+                - arn:aws:s3:::aws-codedeploy-eu-west-3/*
+                - arn:aws:s3:::aws-codedeploy-eu-central-1/*
+                - arn:aws:s3:::aws-codedeploy-ap-northeast-1/*
+                - arn:aws:s3:::aws-codedeploy-ap-northeast-2/*
+                - arn:aws:s3:::aws-codedeploy-ap-southeast-1/*
+                - arn:aws:s3:::aws-codedeploy-ap-southeast-2/*
+                - arn:aws:s3:::aws-codedeploy-ap-south-1/*
+                - arn:aws:s3:::aws-codedeploy-sa-east-1/*
+        -
+          PolicyName: my-dynamodb-permissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                - dynamodb:*
+                Resource:
+                - "*"
+        -
+          PolicyName: my-cloud-watch-permissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+                Resource:
+                - arn:aws:logs:*:*:*
+        -
+          PolicyName: my-permissions-for-code-deploy-svc
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                - autoscaling:*
+                - codedeploy:*
+                - ec2:*
+                - lambda:*
+                - elasticloadbalancing:*
+                - iam:AddRoleToInstanceProfile
+                - iam:CreateInstanceProfile
+                - iam:CreateRole
+                - iam:DeleteInstanceProfile
+                - iam:DeleteRole
+                - iam:DeleteRolePolicy
+                - iam:GetInstanceProfile
+                - iam:GetRole
+                - iam:GetRolePolicy
+                - iam:ListInstanceProfilesForRole
+                - iam:ListRolePolicies
+                - iam:ListRoles
+                - iam:PassRole
+                - iam:PutRolePolicy
+                - iam:RemoveRoleFromInstanceProfile
+                - s3:*
+                Resource:
+                - "*"
+
+  EC2AndCodeDeployInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        -
+          Ref: EC2AndCodeDeployRole
+
+
+  WebDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName:
+        Ref: CodeDeployApp
+      AutoScalingGroups:
+      - Ref: WebServerASG
+      Deployment:
+        Description: Deploy Angular web app distribution from S3
+        Revision:
+          RevisionType: S3
+          S3Location:
+            Bucket:
+              Ref: S3CodeBucket
+            Key:
+              Ref: AppBundle
+            BundleType: Zip
+      ServiceRoleArn:  !GetAtt EC2AndCodeDeployRole.Arn
+
+  RESTDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName:
+        Ref: CodeDeployApp
+      AutoScalingGroups:
+      - Ref: RESTServerASG
+      Deployment:
+        Description: Deploy REST service war file from S3
+        Revision:
+          RevisionType: S3
+          S3Location:
+            Bucket:
+              Ref: S3CodeBucket
+            Key:
+              Ref: RESTBundle
+            BundleType: Zip
+      ServiceRoleArn: !GetAtt EC2AndCodeDeployRole.Arn
+
+
+  RESTServerLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            /etc/awslogs/config/awslogs.conf:
+              content: !Sub |
+                [general]
+                # Path to the CloudWatch Logs agent's state file.
+                # The agent uses this file to maintain client side state
+                # across its executions.
+                state_file = /var/lib/awslogs/agent-state
+
+                # enables gzip http content encoding to send compressed
+                # payloads to CloudWatch Logs
+                use_gzip_http_content_encoding = true
+
+                [/var/log/tomcat7/catalina.out]
+                file = /var/log/tomcat7/catalina.out
+                buffer_duration = 5000
+                log_stream_name = {instance_id}
+                initial_position = start_of_file
+                log_group_name = /var/log/catalina
+              mode: "000644"
+              owner: root
+              group: root
+    Properties:
+      ImageId: ami-55ef662f # this should be determined based on a map
+                            # based on region and InstanceType.
+      InstanceType:
+        Ref: InstanceType
+      KeyName:
+        Ref: KeyName
+      IamInstanceProfile:
+        Ref: EC2AndCodeDeployInstanceProfile
+      SecurityGroups:
+      - Ref: RESTServerSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+           #!/bin/bash -xe
+
+           # general update and install java and tomcat
+           yum update -y aws-cfn-bootstrap    # aws-cfn-bootstrap needed??
+           yum install java-1.8.0 -y          # how to best manage version updates?
+           yum remove java-1.7.0-openjdk -y
+           yum install -y tomcat7             # how to best manage version updates?
+           yum install -y tomcat7-webapps     # enables default Tomcat home page
+           service tomcat7 start
+           chkconfig tomcat7 on
+           usermod -a -G tomcat ec2-user   # allow ec2-user to deploy war files
+
+           # install CloudWatch agent to support console access to logs
+           yum install -y awslogs
+
+           # use cfn-init to configure cloudwatch
+           /opt/aws/bin/cfn-init -v --stack ${AWS::StackId} \
+            --resource RESTServerLaunchConfig --region ${AWS::Region}
+
+           # start cloudwatch and ensure it auto-starts on reboot
+           service awslogs start
+           chkconfig awslogs on
+
+           # configure the CodeDeploy agent to support auto deployment of code
+           yum install -y ruby
+           cd /home/ec2-user
+           curl -O https://aws-codedeploy-us-east-1.s3.amazonaws.com/latest/install
+           chmod +x ./install
+           ./install auto
+
+           # signal tells CloudFormation that this instance is good to go
+           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} \
+            --resource RESTServerLaunchConfig --region ${AWS::Region}
+
+  RESTServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP, REST, and SSH access
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: 80
+        IpProtocol: tcp
+        ToPort: 80
+      - CidrIp: 0.0.0.0/0
+        FromPort: 8080
+        IpProtocol: tcp
+        ToPort: 8080
+      - CidrIp: !Ref SSHLocation
+        FromPort: 22
+        IpProtocol: tcp
+        ToPort: 22
+      VpcId:
+        Ref: StackVPCId
+
+  WebServerASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: RESTLoadBalancer
+    Properties:
+      Tags:
+      - Key: REST_DNS
+        Value: !Sub ${RESTLoadBalancer.DNSName}
+        PropagateAtLaunch: true
+      - Key: EnvName
+        Value:
+          Ref: EnvName
+        PropagateAtLaunch: true
+      AvailabilityZones: !GetAZs '' # or list explicitly as us-east-1b
+      TargetGroupARNs:
+      - Ref: WebLBTargetGroup
+      LaunchConfigurationName:
+        Ref: WebServerLaunchConfig
+      MinSize: 2
+      MaxSize: 5
+      DesiredCapacity: 2
+      Cooldown: 300
+      HealthCheckGracePeriod: 60
+
+  RESTServerASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      Tags:
+      - Key: EnvName
+        Value:
+          Ref: EnvName
+        PropagateAtLaunch: true
+      AvailabilityZones: !GetAZs '' # or list explicitly as us-east-1b
+      TargetGroupARNs:
+      - Ref: RESTLBTargetGroup
+      LaunchConfigurationName:
+        Ref: RESTServerLaunchConfig
+      MinSize: 2
+      MaxSize: 5
+      DesiredCapacity: 2
+      Cooldown: 300
+      HealthCheckGracePeriod: 60
+
+###
+  RESTNetworkOutScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName:
+        Ref: RESTServerASG
+      PolicyType: StepScaling
+      MetricAggregationType: Average
+      EstimatedInstanceWarmup: 60
+
+      # add one EC2 if breach is <= 500k, else add 2
+      StepAdjustments:
+      -
+        MetricIntervalUpperBound: 500000.0
+        ScalingAdjustment: 1
+      -
+        MetricIntervalLowerBound: 500000.0
+        ScalingAdjustment: 2
+
+  RESTNetworkOutHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+      - Ref: NetworkOutScaleUpPolicy
+      MetricName: NetworkOut
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 500000
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value:
+          Ref: RESTServerASG
+
+  RESTNetworkOutLowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+      - Ref: NetworkOutScaleDownPolicy
+      MetricName: NetworkOut
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 30000
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value:
+          Ref: RESTServerASG
+
+  RESTNetworkOutScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ExactCapacity
+      AutoScalingGroupName:
+        Ref: RESTServerASG
+      PolicyType: StepScaling
+      MetricAggregationType: Average
+      EstimatedInstanceWarmup: 60
+
+      # set capacity to exactly 2 if NWOut is low
+      StepAdjustments:
+      -
+        MetricIntervalUpperBound: 0.0
+        ScalingAdjustment: 2
+
+###
+
+  NetworkOutScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName:
+        Ref: WebServerASG
+      PolicyType: StepScaling
+      MetricAggregationType: Average
+      EstimatedInstanceWarmup: 60
+
+      # add one EC2 if breach is <= 500k, else add 2
+      StepAdjustments:
+      -
+        MetricIntervalUpperBound: 500000.0
+        ScalingAdjustment: 1
+      -
+        MetricIntervalLowerBound: 500000.0
+        ScalingAdjustment: 2
+
+  NetworkOutHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+      - Ref: NetworkOutScaleUpPolicy
+      MetricName: NetworkOut
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 500000
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value:
+          Ref: WebServerASG
+
+  NetworkOutLowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+      - Ref: NetworkOutScaleDownPolicy
+      MetricName: NetworkOut
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 30000
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value:
+          Ref: WebServerASG
+
+  NetworkOutScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ExactCapacity
+      AutoScalingGroupName:
+        Ref: WebServerASG
+      PolicyType: StepScaling
+      MetricAggregationType: Average
+      EstimatedInstanceWarmup: 60
+
+      # set capacity to exactly 2 if NWOut is low
+      StepAdjustments:
+      -
+        MetricIntervalUpperBound: 0.0
+        ScalingAdjustment: 2
+
+  WebServerLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    DependsOn: RESTServerASG
+    Metadata:
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            /etc/awslogs/config/awslogs.conf:
+              content: !Sub |
+                [general]
+                # Path to the CloudWatch Logs agent's state file.
+                # The agent uses this file to maintain client side state
+                # across its executions.
+                state_file = /var/lib/awslogs/agent-state
+
+                # enables gzip http content encoding to send compressed
+                # payloads to CloudWatch Logs
+                use_gzip_http_content_encoding = true
+
+                [/var/log/httpd/access_log]
+                file = /var/log/httpd/access_log
+                buffer_duration = 5000
+                log_stream_name = {instance_id}
+                initial_position = start_of_file
+                log_group_name = /var/log/httpd/access_log
+
+                [/var/log/httpd/error_log]
+                file = /var/log/httpd/error_log
+                buffer_duration = 5000
+                log_stream_name = {instance_id}
+                initial_position = start_of_file
+                log_group_name = /var/log/httpd/error_log
+              mode: "000644"
+              owner: root
+              group: root
+    Properties:
+      IamInstanceProfile:
+        Ref: EC2AndCodeDeployInstanceProfile
+      ImageId: ami-55ef662f # should be parameter, or pulled from a map
+      InstanceType:
+        Ref: InstanceType
+      KeyName:
+        Ref: KeyName
+      SecurityGroups:
+      - Ref: WebServerSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+           #!/bin/bash -xe
+
+           # get latest packages
+           yum update -y aws-cfn-bootstrap
+
+           # install and configure Apache web server
+           yum install -y httpd24 php56
+           service httpd start
+           chkconfig httpd on
+
+           # install CloudWatch agent to support console access to logs
+           yum install -y awslogs
+
+           # use cfn-init to configure cloudwatch
+           /opt/aws/bin/cfn-init -v --stack ${AWS::StackId} \
+            --resource WebServerLaunchConfig --region ${AWS::Region}
+
+           # start cloudwatch and ensure it auto-starts on reboot
+           service awslogs start
+           chkconfig awslogs on
+
+           # install the codedeploy agent
+           yum install -y ruby
+           cd /home/ec2-user
+           curl -O https://aws-codedeploy-us-east-1.s3.amazonaws.com/latest/install
+           chmod +x ./install
+           ./install auto
+
+           # configure Apache
+           groupadd www
+           usermod -a -G www ec2-user
+           chown -R root:www /var/www
+           chmod 2775 /var/www
+           find /var/www -type d -exec chmod 2775 {} +
+           find /var/www -type f -exec chmod 0664 {} +
+
+           # signal completion
+           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} \
+            --resource WebServerLaunchConfig --region ${AWS::Region}
+
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP and SSH access
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: 80
+        IpProtocol: tcp
+        ToPort: 80
+      - CidrIp: !Ref SSHLocation
+        FromPort: 22
+        IpProtocol: tcp
+        ToPort: 22
+      VpcId: # leaving off this property caused the stack creation to fail
+        Ref: StackVPCId
+
+Outputs:
+  WebLBDNS:
+    Description: Web Load Banalcer DNS
+    Value: !Sub ${WebLoadBalancer.DNSName}
+  RESTURL:
+    Description: REST Tomcat URL
+    Value: !Sub http://${RESTLoadBalancer.DNSName}:8080
