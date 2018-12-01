@@ -1,0 +1,1382 @@
+###############################################################################
+# Re:Invent Demo
+# Created: 2018.10.01 by Chris F. Williams
+# Updated: 2018.11.29
+###############################################################################
+# To Do List:
+# 1. clean up RDS disk alerting
+# 2. Make sure bastion host allows for more than 3 connections
+# 3. Pull cert from ACM and apply to ALB
+# 4. Add ALB & listeners for UAT and Dev w/ (?)-redirect
+# 5. Create a role that does the following & apply it to all the EC2 instances
+#       Use With CloudWatch Agent
+#       AmazonEC2RoleforSSM
+###############################################################################
+---
+Parameters:
+  PeerRequesterAccountId:
+    Description: "Please input the account ID of the Administrative Account for this region"
+    Type: String
+  EnvironmentName: 
+    Description: "Environment name resource tag"
+    Type: String
+  CustomerID:
+    Description: "Customer ID resource tag"
+    Type: String
+  CustomerName: 
+    Description: "Customer Name resource tag"
+    Type: String
+  PatchGroup:
+    Description: "Patch Group resource tag for SMS"
+    Type: String
+  ProductVersion: 
+    Description: "Product version tag for application stack names"
+    Type: String
+  VPCCIDR:
+    Description: VPCCIDR Range (will be a /24 block)
+    Type: String
+    Default: 172.26.1.0
+  PublicSubnetAZ1CIDR:
+    Description: CIDR Block for the public DMZ subnet 1 located in AZ 1 (x.x.x.1-61/26)
+    Type: String
+    Default: 172.26.1.0/26
+  PublicSubnetAZ2CIDR: 
+    Description: CIDR Block for the public DMZ subnet 2 located in AZ 2 (x.x.x.65-126/26)
+    Type: String
+    Default: 172.26.1.64/26
+  PrivateSubnetAZ1CIDR:
+    Description: CIDR block for private subnet 1 located in AZ 1 (x.x.x.129-190/26)
+    Type: String
+    Default: 172.26.1.128/26
+  PrivateSubnetAZ2CIDR: 
+    Description: CIDR block for private subnet 2 located in AZ 2 (x.x.x.193-254-190/26)
+    Type: String
+    Default: 172.26.1.192/26
+  ProdInstanceType:
+    Description: EC2 instance type for the Production Environment
+    Type: String
+    Default: m5.xlarge
+    AllowedValues:
+      - t2.micro
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - m5.large
+      - m5.xlarge
+      - m5.2xlarge
+      - m5.4xlarge
+    ConstraintDescription: Must be a valid EC2 instance type.
+  UATInstanceType:
+    Description: EC2 instance type for the UAT Environment
+    Type: String
+    Default: m5.xlarge
+    AllowedValues:
+      - t2.micro
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - m5.large
+      - m5.xlarge
+      - m5.2xlarge
+      - m5.4xlarge
+    ConstraintDescription: Must be a valid EC2 instance type.
+  DevInstanceType:
+    Description: EC2 instance type for the Dev Environment
+    Type: String
+    Default: m5.xlarge
+    AllowedValues:
+      - t2.micro
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - m5.large
+      - m5.xlarge
+      - m5.2xlarge
+      - m5.4xlarge
+    ConstraintDescription: Must be a valid EC2 instance type.   
+  BIInstanceType:
+    Description: EC2 instance type for the BI Environment
+    Type: String
+    Default: m5.xlarge
+    AllowedValues: 
+      - t2.micro
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - m5.large
+      - m5.xlarge
+      - m5.2xlarge
+      - m5.4xlarge
+    ConstraintDescription: Must be a valid EC2 instance type.
+  KeyName:
+    Description: Name of an existing EC2 KeyPair
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair
+  TrailBucket:
+    Type: String
+    Description: Create a new bucket name for CloudTrail logs, make sure it's all lower case.
+  RDSDevInstanceType:
+    Description: EC2 instance type for Dev RDS
+    Type: String
+    Default: db.t2.medium
+    AllowedValues: [db.t2.medium, db.m4.large, db.m4.xlarge, db.m4.2xlarge,db.m4.4xlarge, db.r4.large, db.r4.xlarge, db.r4.2xlarge]
+    ConstraintDescription: Must be a valid EC2 instance type.
+  RDSUATInstanceType:
+    Description: EC2 instance type for UAT RDS
+    Type: String
+    Default: db.t2.medium
+    AllowedValues: [db.t2.medium, db.m4.large, db.m4.xlarge, db.m4.2xlarge,db.m4.4xlarge, db.r4.large, db.r4.xlarge, db.r4.2xlarge]
+    ConstraintDescription: Must be a valid EC2 instance type.
+  RDSProdInstanceType:
+    Description: EC2 instance types for Prod RDS
+    Type: String
+    Default: db.t2.medium
+    AllowedValues: [db.t2.medium, db.m4.large, db.m4.xlarge, db.m4.2xlarge,db.m4.4xlarge, db.r4.large, db.r4.xlarge, db.r4.2xlarge]
+    ConstraintDescription: Must be a valid EC2 instance type.
+  DBName:
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    Default: ORCL
+    Description: Name of Oracle DB for Software Stack
+    MaxLength: '8'
+    MinLength: '4'
+    Type: String
+  DBMasterUsername:
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+    Default: admin
+    Description: The database admin account username
+    MaxLength: '16'
+    MinLength: '1'
+    NoEcho: 'true'
+    Type: String
+  DBMasterUserPassword:
+    AllowedPattern: (?=^.{6,255}$)((?=.*\d)(?=.*[A-Z])(?=.*[a-z])|(?=.*\d)(?=.*[^A-Za-z0-9])(?=.*[a-z])|(?=.*[^A-Za-z0-9])(?=.*[A-Z])(?=.*[a-z])|(?=.*\d)(?=.*[A-Z])(?=.*[^A-Za-z0-9]))^.*
+    ConstraintDescription: Min 8 chars.
+    Default: Admin-123456
+    Description: The database admin account password
+    MaxLength: '64'
+    MinLength: '8'
+    NoEcho: 'True'
+    Type: String
+Metadata:
+  AWS::CloudFormation::Interface: 
+    ParameterGroups: 
+      - 
+        Label: 
+          default: "Amazon EC2 Configuration"
+        Parameters: 
+          - KeyName
+          - ProdInstanceType
+          - UATInstanceType
+          - DevInstanceType 
+          - BIInstanceType 
+      - 
+        Label: 
+          default: "Network Configuration"
+        Parameters: 
+          - VPCCIDR
+          - PublicSubnetAZ1CIDR
+          - PublicSubnetAZ2CIDR
+          - PrivateSubnetAZ1CIDR
+          - PrivateSubnetAZ2CIDR
+      - 
+        Label:
+          default: "Database Configuration"
+        Parameters:
+          - DBName
+          - DBMasterUsername
+          - DBMasterUserPassword
+          - RDSDevInstanceType
+          - RDSUATInstanceType
+          - RDSProdInstanceType
+      -
+        Label:
+          default: "Resource Tags"
+        Parameters:
+          - CustomerID
+          - CustomerName
+          - EnvironmentName
+          - PatchGroup
+          - ProductVersion
+Mappings:
+  RegionMap:
+    'ap-south-1':
+      AMI: 'ami-d783a9b8'
+    'eu-west-3':
+      AMI: 'ami-2cf54551'
+    'eu-west-2':
+      AMI: 'ami-b8b45ddf'
+    'eu-west-1':
+      AMI: 'ami-466768ac'
+    'ap-northeast-2':
+      AMI: 'ami-afd86dc1'
+    'ap-northeast-1':
+      AMI: 'ami-e99f4896'
+    'sa-east-1':
+      AMI: 'ami-6dca9001'
+    'ca-central-1':
+      AMI: 'ami-0ee86a6a'
+    'ap-southeast-1':
+      AMI: 'ami-05868579'
+    'ap-southeast-2':
+      AMI: 'ami-39f8215b'
+    'eu-central-1':
+      AMI: 'ami-7c4f7097'
+    'us-east-1':
+      AMI: 'ami-04681a1dbd79675a5'
+    'us-east-2':
+      AMI: 'ami-8c122be9'
+    'us-west-1':
+      AMI: 'ami-e0ba5c83'
+    'us-west-2':
+      AMI: 'ami-a9d09ed1'
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock:
+        Fn::Join:
+        - ''
+        - - Ref: VPCCIDR
+          - "/24"
+      EnableDnsSupport: 'True'
+      EnableDnsHostnames: 'True'
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-VPC"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+  PublicSubnet1A:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - '0'
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock: !Ref PublicSubnetAZ1CIDR
+      MapPublicIpOnLaunch: 'True'
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-PublicAZ1"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+      VpcId:
+        Ref: VPC
+  PublicSubnet1B:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - '1'
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock: !Ref PublicSubnetAZ2CIDR
+      MapPublicIpOnLaunch: 'True'
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-PublicAZ2"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+      VpcId:
+        Ref: VPC
+  PrivateSubnet1A:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - '0'
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock: !Ref PrivateSubnetAZ1CIDR
+      MapPublicIpOnLaunch: 'False'
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-PrivateAZ1"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+      - Key: Network
+        Value: private
+      VpcId:
+        Ref: VPC
+  PrivateSubnet1B:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - '1'
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock: !Ref PrivateSubnetAZ2CIDR
+      MapPublicIpOnLaunch: 'False'
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-PrivateAZ2"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+      - Key: Network
+        Value: private
+      VpcId:
+        Ref: VPC
+  RDSSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS databases
+      SubnetIds:
+      - Ref: PrivateSubnet1A
+      - Ref: PrivateSubnet1B
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-IGW"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId:
+        Ref: InternetGateway
+      VpcId:
+        Ref: VPC
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-PublicRT"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+  RouteTablePrivateAZ1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-PrivateAZ1RT"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+  RouteTablePrivateAZ2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-PrivateAZ2RT"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+  PublicSubnetRoute:
+    DependsOn:
+    - VPCGatewayAttachment
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: PublicSubnetRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+  RouteAssociationPublicAZ1Default:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnet1A
+      RouteTableId:
+        Ref: PublicSubnetRouteTable
+  RouteAssociationPublicAZ2Default:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnet1B
+      RouteTableId:
+        Ref: PublicSubnetRouteTable
+  RouteAssociationPrivateAZ1Default:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PrivateSubnet1A
+      RouteTableId:
+        Ref: RouteTablePrivateAZ1
+  RouteAssociationPrivateAZ2Default:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId:
+        Ref: PrivateSubnet1B
+      RouteTableId:
+        Ref: RouteTablePrivateAZ2
+  NATGatewayAZ1:
+    Type: AWS::EC2::NatGateway
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+        - EIPNATAZ1
+        - AllocationId
+      SubnetId:
+        Ref: PublicSubnet1A
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-NATGatewayAZ1"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+  EIPNATAZ1:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  NATAZ1Route:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: RouteTablePrivateAZ1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId:
+        Ref: NATGatewayAZ1
+  NATGatewayAZ2:
+    Type: AWS::EC2::NatGateway
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+        - EIPNATAZ2
+        - AllocationId
+      SubnetId:
+        Ref: PublicSubnet1B
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-NATGatewayAZ2"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+  EIPNATAZ2:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  NATAZ2Route:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: RouteTablePrivateAZ2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId:
+        Ref: NATGatewayAZ2
+  PrivateSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for Private AZ servers
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      #SecurityGroupEgress:
+      #- IpProtocol: tcp
+      #  FromPort: 22
+      #  ToPort: 22
+      #  CidrIp: 0.0.0.0/0
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-PrivateSecurityGroup"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for RDS servers
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 1521
+        ToPort: 1521
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: -1
+        CidrIp: 0.0.0.0/0
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-RDSSecurityGroup"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+  ELBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for Public AZ servers
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      #SecurityGroupEgress:
+      #- IpProtocol: tcp
+      #  FromPort: 22
+      #  ToPort: 22
+      #  CidrIp: 0.0.0.0/0
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-ELBSecurityGroup"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+  DevEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      SecurityGroupIds: 
+      - Ref: PrivateSecurityGroup
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PrivateSubnet1A
+      InstanceType: !Ref DevInstanceType
+      IamInstanceProfile: !Ref IAMInstanceProfile
+      ImageId: !FindInMap [RegionMap, !Ref 'AWS::Region', AMI]
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-Dev"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+    DependsOn: PrivateSubnet1A
+  UATEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      SecurityGroupIds: 
+      - Ref: PrivateSecurityGroup
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PrivateSubnet1A
+      InstanceType: !Ref UATInstanceType
+      IamInstanceProfile: !Ref IAMInstanceProfile
+      ImageId: !FindInMap [RegionMap, !Ref 'AWS::Region', AMI]
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-UAT"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+    DependsOn: PrivateSubnet1A
+  Prod1EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      SecurityGroupIds: 
+      - Ref: PrivateSecurityGroup
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PrivateSubnet1A
+      InstanceType: !Ref ProdInstanceType
+      IamInstanceProfile: !Ref IAMInstanceProfile
+      ImageId: !FindInMap [RegionMap, !Ref 'AWS::Region', AMI]
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-Prod1"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+    DependsOn: PrivateSubnet1A
+  Prod2EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      SecurityGroupIds: 
+      - Ref: PrivateSecurityGroup
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PrivateSubnet1B
+      InstanceType: !Ref ProdInstanceType
+      IamInstanceProfile: !Ref IAMInstanceProfile
+      ImageId: !FindInMap [RegionMap, !Ref 'AWS::Region', AMI]
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-Prod2"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+    DependsOn: PrivateSubnet1B
+  DefaultTargetGroup: 
+    Properties: 
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      Name: !Ref EnvironmentName
+      Port: 80
+      Protocol: HTTP
+      Targets: 
+        - 
+          Id: 
+            Ref: Prod1EC2Instance
+          Port: 80
+        - 
+          Id: 
+            Ref: Prod2EC2Instance
+          Port: 80
+      VpcId: 
+        Ref: VPC
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+  SecondTargetGroup: 
+    Properties: 
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      Name: SecondTargetGroup
+      Port: 80
+      Protocol: HTTP
+      Targets: 
+        - 
+          Id: 
+            Ref: DevEC2Instance
+          Port: 80
+        - 
+          Id: 
+            Ref: UATEC2Instance
+          Port: 80
+      VpcId: 
+        Ref: VPC
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+  LoadBalancerListener: 
+    Properties: 
+      DefaultActions: 
+        - 
+          TargetGroupArn: !Ref DefaultTargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref Vendoralb
+      Port: 80
+      Protocol: HTTP
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+  ListenerRule1:
+      Type: AWS::ElasticLoadBalancingV2::ListenerRule
+      Properties:
+        Actions:
+          - Type: forward
+            TargetGroupArn: !Ref SecondTargetGroup
+        Conditions:
+          - Field: path-pattern
+            Values:
+            - "/Dev/*"
+        ListenerArn:
+            Ref: LoadBalancerListener
+        Priority: 1
+  ListenerRule2:
+      Type: AWS::ElasticLoadBalancingV2::ListenerRule
+      Properties:
+        Actions:
+          - Type: forward
+            TargetGroupArn: !Ref SecondTargetGroup
+        Conditions:
+          - Field: path-pattern
+            Values:
+            - "/UAT/*"
+        ListenerArn:
+            Ref: LoadBalancerListener
+        Priority: 2
+  Vendoralb: 
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    Properties: 
+      Name: !Ref EnvironmentName
+      Scheme: internet-facing
+      Subnets: 
+       - Ref: PublicSubnet1A
+       - Ref: PublicSubnet1B
+      SecurityGroups: 
+       - !Ref ELBSecurityGroup
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-Vendoralb"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+  BIEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      SecurityGroupIds: 
+      - Ref: PrivateSecurityGroup
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PrivateSubnet1B
+      InstanceType: !Ref BIInstanceType
+      ImageId: !FindInMap [RegionMap, !Ref 'AWS::Region', AMI]
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-BI"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+    DependsOn: PrivateSubnet1B
+  IAMRole: 
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Statement: 
+          - 
+            Effect: Allow
+            Principal: 
+              Service: 
+                - "ec2.amazonaws.com"
+            Action: 
+                - "sts:AssumeRole"
+      Path: "/"
+  IAMInstanceProfile: 
+    Type: "AWS::IAM::InstanceProfile"
+    Properties: 
+      Path: "/"
+      Roles: 
+        - 
+          Ref: IAMRole
+  IAMRolePolicies: 
+    Type: "AWS::IAM::Policy"
+    Properties: 
+       PolicyName: IAMCustomRole
+       PolicyDocument: 
+        Statement: 
+         - 
+           Effect: Allow
+           Action: 
+             - "ssm:DescribeAssociation"
+             - "ssm:GetDeployablePatchSnapshotForInstance"
+             - "ssm:GetDocument"
+             - "ssm:GetManifest"
+             - "ssm:GetParameters"
+             - "ssm:ListAssociations"
+             - "ssm:ListInstanceAssociations"
+             - "ssm:PutInventory"
+             - "ssm:PutComplianceItems"
+             - "ssm:PutConfigurePackageResult"
+             - "ssm:UpdateAssociationStatus"
+             - "ssm:UpdateInstanceAssociationStatus"
+             - "ssm:UpdateInstanceInformation"
+           Resource: "*"
+         - 
+           Effect: Allow
+           Action: 
+             - "ssmmessages:CreateControlChannel"
+             - "ssmmessages:CreateDataChannel"
+             - "ssmmessages:OpenControlChannel"
+             - "ssmmessages:OpenDataChannel"
+           Resource: "*"
+         - 
+           Effect: Allow
+           Action: 
+             - "ec2messages:AcknowledgeMessage"
+             - "ec2messages:DeleteMessage"
+             - "ec2messages:FailMessage"
+             - "ec2messages:GetEndpoint"
+             - "ec2messages:GetMessages"
+             - "ec2messages:SendReply"
+           Resource: "*"
+         - 
+           Effect: Allow
+           Action: 
+             - "cloudwatch:PutMetricData"
+           Resource: "*"
+         - 
+           Effect: Allow
+           Action: 
+             - "ec2:DescribeInstanceStatus"
+           Resource: "*"
+         - 
+           Effect: Allow
+           Action: 
+             - "ds:CreateComputer"
+             - "ds:DescribeDirectories"
+           Resource: "*"
+         - 
+           Effect: Allow
+           Action: 
+             - "logs:CreateLogGroup"
+             - "logs:CreateLogStream"
+             - "logs:DescribeLogGroups"
+             - "logs:DescribeLogStreams"
+             - "logs:PutLogEvents"
+           Resource: "*"
+         - 
+           Effect: Allow
+           Action: 
+             - "s3:PutObject"
+             - "s3:GetObject"
+             - "s3:GetEncryptionConfiguration"
+             - "s3:AbortMultipartUpload"
+             - "s3:ListMultipartUploadParts"
+             - "s3:ListBucket"
+             - "s3:ListBucketMultipartUploads"
+           Resource: "*"
+         -
+           Effect: Allow
+           Action: 
+             - "cloudwatch:PutMetricData"
+             - "ec2:DescribeTags"
+             - "logs:PutLogEvents"
+             - "logs:DescribeLogStreams"
+             - "logs:DescribeLogGroups"
+             - "logs:CreateLogStream"
+             - "logs:CreateLogGroup"
+           Resource: "*"
+       Roles: 
+         - 
+           Ref: IAMRole
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties: 
+       DisplayName: Vendor
+       TopicName: Vendor-Notification
+  DevCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: CPU alarm for my instance
+      AlarmActions:
+      - Ref: SNSTopic
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '60'
+      EvaluationPeriods: '3'
+      Threshold: '80'
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+      - Name: InstanceId
+        Value: !Ref DevEC2Instance
+  UATCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: CPU alarm for my instance
+      AlarmActions:
+      - Ref: SNSTopic
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '60'
+      EvaluationPeriods: '3'
+      Threshold: '80'
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+      - Name: InstanceId
+        Value: !Ref UATEC2Instance
+  Prod1CPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: CPU alarm for my instance
+      AlarmActions:
+      - Ref: SNSTopic
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '60'
+      EvaluationPeriods: '3'
+      Threshold: '80'
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+      - Name: InstanceId
+        Value: !Ref Prod1EC2Instance
+  Prod2CPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: CPU alarm for my instance
+      AlarmActions:
+      - Ref: SNSTopic
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: '60'
+      EvaluationPeriods: '3'
+      Threshold: '80'
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+      - Name: InstanceId
+        Value: !Ref Prod2EC2Instance
+  RDSdev:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: '20'
+      AllowMajorVersionUpgrade: 'false'
+      AutoMinorVersionUpgrade: 'true'
+      CharacterSetName: AL32UTF8
+      DBInstanceClass: !Ref RDSDevInstanceType
+      DBInstanceIdentifier: !Join ['-',["RDS",!Ref "AWS::StackName", "Dev"]]
+      Port: '1521'
+      StorageType: gp2
+      BackupRetentionPeriod: '7'
+      MasterUsername: !Ref DBMasterUsername
+      MasterUserPassword: !Ref DBMasterUserPassword
+      PreferredBackupWindow: 06:04-06:34
+      PreferredMaintenanceWindow: tue:09:45-tue:10:15
+      DBName: ORCL
+      Engine: oracle-se2
+      EngineVersion: 12.1.0.2.v12
+      LicenseModel: bring-your-own-license
+      DBSubnetGroupName:
+        Ref: RDSSubnetGroup
+      VPCSecurityGroups:
+        - Ref: RDSSecurityGroup
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-RDSdev"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+      - Key: DB Role
+        Value: DB-PRIM
+      - Key: DB Type
+        Value: ORACLE
+  RDSuat:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: '20'
+      AllowMajorVersionUpgrade: 'false'
+      AutoMinorVersionUpgrade: 'true'
+      CharacterSetName: AL32UTF8
+      DBInstanceClass: !Ref RDSUATInstanceType
+      DBInstanceIdentifier: !Join ['-',["RDS",!Ref "AWS::StackName", "UAT"]]
+      Port: '1521'
+      StorageType: gp2
+      BackupRetentionPeriod: '7'
+      MasterUsername: username
+      MasterUserPassword: MyPassword
+      PreferredBackupWindow: 06:04-06:34
+      PreferredMaintenanceWindow: tue:09:45-tue:10:15
+      DBName: ORCL
+      Engine: oracle-se2
+      EngineVersion: 12.1.0.2.v12
+      LicenseModel: bring-your-own-license
+      DBSubnetGroupName:
+        Ref: RDSSubnetGroup
+      VPCSecurityGroups:
+        - Ref: RDSSecurityGroup
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-RDSuat"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+      - Key: DB Role
+        Value: DB-PRIM
+      - Key: DB Type
+        Value: ORACLE
+  RDSprod:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: '20'
+      AllowMajorVersionUpgrade: 'false'
+      AutoMinorVersionUpgrade: 'true'
+      CharacterSetName: AL32UTF8
+      DBInstanceClass: !Ref RDSProdInstanceType
+      DBInstanceIdentifier: !Join ['-',["RDS",!Ref "AWS::StackName", "Prod"]]
+      Port: '1521'
+      StorageType: gp2
+      BackupRetentionPeriod: '7'
+      MasterUsername: DBMasterUsername
+      MasterUserPassword: DBMasterUserPassword
+      PreferredBackupWindow: 06:04-06:34
+      PreferredMaintenanceWindow: tue:09:45-tue:10:15
+      DBName: ORCL
+      Engine: oracle-se2
+      EngineVersion: 12.1.0.2.v12
+      LicenseModel: bring-your-own-license
+      MultiAZ: 'true'
+      DBSubnetGroupName:
+        Ref: RDSSubnetGroup
+      VPCSecurityGroups:
+        - Ref: RDSSecurityGroup
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-RDSprod"
+      - Key: Customer ID
+        Value: !Ref CustomerID
+      - Key: Customer Name
+        Value: !Ref CustomerName
+      - Key: Patch Group
+        Value: !Ref PatchGroup
+      - Key: DB Role
+        Value: DB-PRIM
+      - Key: DB Type
+        Value: ORACLE
+  RDSDevCPUUtilizationAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmActions:
+      - !Ref SNSTopic
+      AlarmDescription: 'Average database CPU utilization over last 10 minutes too high'
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+      - Name: DBInstanceIdentifier
+        Value: !Ref RDSdev
+      EvaluationPeriods: 1
+      MetricName: CPUUtilization
+      Namespace: 'AWS/RDS'
+      OKActions:
+      - !Ref SNSTopic
+      Period: 60
+      Statistic: Average
+      Threshold: '80'
+  RDSDevFreeStorageSpaceAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmActions:
+      - !Ref SNSTopic
+      AlarmDescription: 'Average database free storage space over last 10 minutes too low.'
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+      - Name: DBInstanceIdentifier
+        Value: !Ref RDSdev
+      EvaluationPeriods: 1
+      MetricName: FreeStorageSpace
+      Namespace: 'AWS/RDS'
+      OKActions:
+      - !Ref SNSTopic
+      Period: 60
+      Statistic: Average
+      Threshold: '5242880'
+  RDSuatCPUUtilizationAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmActions:
+      - !Ref SNSTopic
+      AlarmDescription: 'Average database CPU utilization over last 10 minutes too high'
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+      - Name: DBInstanceIdentifier
+        Value: !Ref RDSuat
+      EvaluationPeriods: 1
+      MetricName: CPUUtilization
+      Namespace: 'AWS/RDS'
+      OKActions:
+      - !Ref SNSTopic
+      Period: 60
+      Statistic: Average
+      Threshold: '80'
+  RDSDevFreeStorageSpaceAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmActions:
+      - !Ref SNSTopic
+      AlarmDescription: 'Average database free storage space over last 10 minutes too low.'
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+      - Name: DBInstanceIdentifier
+        Value: !Ref RDSuat
+      EvaluationPeriods: 1
+      MetricName: FreeStorageSpace
+      Namespace: 'AWS/RDS'
+      OKActions:
+      - !Ref SNSTopic
+      Period: 60
+      Statistic: Average
+      Threshold: '5242880'
+  RDSProdCPUUtilizationAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmActions:
+      - !Ref SNSTopic
+      AlarmDescription: 'Average database CPU utilization over last 10 minutes too high'
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+      - Name: DBInstanceIdentifier
+        Value: !Ref RDSprod
+      EvaluationPeriods: 1
+      MetricName: CPUUtilization
+      Namespace: 'AWS/RDS'
+      OKActions:
+      - !Ref SNSTopic
+      Period: 60
+      Statistic: Average
+      Threshold: '80'
+  RDSProdFreeStorageSpaceAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmActions:
+      - !Ref SNSTopic
+      AlarmDescription: 'Average database free storage space over last 10 minutes too low.'
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+      - Name: DBInstanceIdentifier
+        Value: !Ref RDSprod
+      EvaluationPeriods: 1
+      MetricName: FreeStorageSpace
+      Namespace: 'AWS/RDS'
+      OKActions:
+      - !Ref SNSTopic
+      Period: 60
+      Statistic: Average
+      Threshold: '5242880'
+  Trail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: CloudTrailBucket
+    DependsOn: S3BucketPolicy
+    Properties:
+      S3BucketName: !Ref TrailBucket
+      IsLogging: True
+      IncludeGlobalServiceEvents: True
+      EnableLogFileValidation: True
+      IsMultiRegionTrail: True
+  CloudTrailBucket:
+    DeletionPolicy: Retain
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref TrailBucket
+      VersioningConfiguration:
+        Status: Enabled
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudTrailBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AWSBucketPermissionsCheck
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !Sub 'arn:aws:s3:::${CloudTrailBucket}'
+          - Sid: AWSBucketDelivery
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub 'arn:aws:s3:::${CloudTrailBucket}/AWSLogs/${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': 'bucket-owner-full-control'
+  peerRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Principal:
+              AWS: !Ref PeerRequesterAccountId
+            Action:
+              - 'sts:AssumeRole'
+            Effect: Allow
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 'ec2:AcceptVpcPeeringConnection'
+                Resource: '*'
+Outputs:
+  VPCID:
+    Value:
+      Ref: VPC
+  ElasticIP1:
+    Value:
+      Ref: EIPNATAZ1
+  ElasticIP2:
+    Value:
+      Ref: EIPNATAZ2
+  SubnetPublicAZ1:
+    Value:
+      Ref: PublicSubnet1A
+  SubnetPublicAZ2:
+    Value:
+      Ref: PublicSubnet1B
+  SubnetPrivateAZ1:
+    Value:
+      Ref: PrivateSubnet1A
+  SubnetPrivateAZ2:
+    Value:
+      Ref: PrivateSubnet1B
+  DefaultSG:
+    Value:
+      Fn::GetAtt:
+      - VPC
+      - DefaultSecurityGroup
+  ProdRdsInfo:
+    Description: Endpoint Address of Prod RDS
+    Value: !GetAtt RDSprod.Endpoint.Address
+  BiIpAddress:
+    Description: IP Address of BI EC2 Instance
+    Value: !GetAtt BIEC2Instance.PrivateIp
+  UatIpAddress:
+    Description: IP Address of UAT EC2 Instance
+    Value: !GetAtt UATEC2Instance.PrivateIp
+  UatRdsInfo:
+    Description: Endpoint Address of UAT RDS
+    Value: !GetAtt RDSuat.Endpoint.Address
+  DevIpAddress:
+    Description: IP Address of Dev EC2 Instance
+    Value: !GetAtt DevEC2Instance.PrivateIp
+  DevRdsInfo:
+    Description: Endpoint Address of Dev RDS
+    Value: !GetAtt RDSdev.Endpoint.Address
+  Prod1IpAddress:
+    Description: IP Address of Prod1 EC2 Instance
+    Value: !GetAtt Prod1EC2Instance.PrivateIp
+  Prod2IpAddress:
+    Description: IP Address of Prod2 EC2 Instance
+    Value: !GetAtt Prod2EC2Instance.PrivateIp
+  RoleARN:
+    Value: !GetAtt 
+      - peerRole
+      - Arn

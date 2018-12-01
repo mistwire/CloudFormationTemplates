@@ -1,0 +1,155 @@
+---
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Trans-regional cloudtrail'
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+    - Label:
+        default: 'CloudTrail Parameters'
+      Parameters:
+      - CloudWatchLogsRetentionInDays
+      - ExternalTrailBucket
+      - LogFilePrefix
+Parameters:
+  CloudWatchLogsRetentionInDays:
+    Description: 'The number of days log events are kept in CloudWatch Logs'
+    Type: Number
+    Default: 7
+    AllowedValues: [7, 30, 90, 180, 365, 1095, 2555, 3650]
+  ExternalTrailBucket:
+    Description: 'Optional The name of the Amazon S3 bucket where CloudTrail publishes log files. If you leave this empty, the Amazon S3 bucket is created for you.'
+    Type: String
+    Default: ''
+  LogFilePrefix:
+    Description: 'Optional The log file prefix.'
+    Type: String
+    Default: ''
+Conditions:
+  InternalBucket: !Equals [!Ref ExternalTrailBucket, '']
+  ExternalBucket: !Not [!Equals [!Ref ExternalTrailBucket, '']]
+Resources:
+  TrailBucket:
+    Condition: InternalBucket
+    DeletionPolicy: Retain
+    Type: 'AWS::S3::Bucket'
+    Properties: {}
+  TrailBucketPolicy:
+    Condition: InternalBucket
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref TrailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: AWSCloudTrailAclCheck
+          Effect: Allow
+          Principal:
+            Service: 'cloudtrail.amazonaws.com'
+          Action: 's3:GetBucketAcl'
+          Resource: !Sub 'arn:aws:s3:::${TrailBucket}'
+        - Sid: AWSCloudTrailWrite
+          Effect: Allow
+          Principal:
+            Service: 'cloudtrail.amazonaws.com'
+          Action: 's3:PutObject'
+          Resource: !Sub 'arn:aws:s3:::${TrailBucket}/AWSLogs/${AWS::AccountId}/*'
+          Condition:
+            StringEquals:
+              's3:x-amz-acl': 'bucket-owner-full-control'
+  TrailLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      RetentionInDays: !Ref CloudWatchLogsRetentionInDays
+  TrailLogGroupRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: AssumeRole1
+          Effect: Allow
+          Principal:
+            Service: 'cloudtrail.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: 'cloudtrail-policy'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: AWSCloudTrailCreateLogStream2014110
+            Effect: Allow
+            Action: 'logs:CreateLogStream'
+            Resource: !GetAtt 'TrailLogGroup.Arn'
+          - Sid: AWSCloudTrailPutLogEvents20141101
+            Effect: Allow
+            Action: 'logs:PutLogEvents'
+            Resource: !GetAtt 'TrailLogGroup.Arn'
+  TrailTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties: {}
+  TrailTopicPolicy:
+    Type: 'AWS::SNS::TopicPolicy'
+    Properties:
+      PolicyDocument:
+        Version: '2008-10-17'
+        Statement:
+        - Sid: AWSCloudTrailSNSPolicy
+          Effect: Allow
+          Principal:
+            Service: 'cloudtrail.amazonaws.com'
+          Resource: !Ref TrailTopic
+          Action: 'sns:Publish'
+      Topics:
+      - !Ref TrailTopic
+  Trail:
+    Condition: InternalBucket
+    DependsOn:
+    - TrailBucketPolicy
+    - TrailTopicPolicy
+    Type: 'AWS::CloudTrail::Trail'
+    Properties:
+      IncludeGlobalServiceEvents: true
+      IsLogging: true
+      IsMultiRegionTrail: true
+      S3BucketName: !Ref TrailBucket
+      S3KeyPrefix: !Ref LogFilePrefix
+      CloudWatchLogsLogGroupArn: !GetAtt 'TrailLogGroup.Arn'
+      CloudWatchLogsRoleArn: !GetAtt 'TrailLogGroupRole.Arn'
+      SnsTopicName: !GetAtt 'TrailTopic.TopicName'
+  ExternalTrail:
+    Condition: ExternalBucket
+    DependsOn:
+    - TrailTopicPolicy
+    Type: 'AWS::CloudTrail::Trail'
+    Properties:
+      IncludeGlobalServiceEvents: true
+      IsLogging: true
+      IsMultiRegionTrail: true
+      S3BucketName: !Ref ExternalTrailBucket
+      S3KeyPrefix: !Ref LogFilePrefix
+      CloudWatchLogsLogGroupArn: !GetAtt 'TrailLogGroup.Arn'
+      CloudWatchLogsRoleArn: !GetAtt 'TrailLogGroupRole.Arn'
+      SnsTopicName: !GetAtt 'TrailTopic.TopicName'
+Outputs:
+  TemplateID:
+    Description: 'cloudonaut.io template id.'
+    Value: 'security/cloudtrail'
+  TemplateVersion:
+    Description: 'cloudonaut.io template version.'
+    Value: '__VERSION__'
+  StackName:
+    Description: 'Stack name.'
+    Value: !Sub '${AWS::StackName}'
